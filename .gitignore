@@ -1,0 +1,12 @@
+# Lokalne sekrety i konfiguracja
+.envrc
+*.pem
+
+# Dokumenty robocze (spec, plan) - trzymane lokalnie
+docs/superpowers/
+
+# Artefakty narzedzi
+.aws-sam/
+__pycache__/
+.pytest_cache/
+.venv/
