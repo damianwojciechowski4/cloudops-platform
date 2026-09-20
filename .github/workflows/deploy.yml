@@ -34,3 +34,76 @@ jobs:
       - run: pip install --quiet pyyaml==6.0.2
       - id: d
         run: python3 scripts/discover-solutions.py "${{ github.event.before }}" "${{ github.sha }}"
+
+  deploy:
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}   # prod = required reviewer
+    strategy:
+      max-parallel: 1          # `order` sekwencyjnie
+      fail-fast: true
+      matrix:
+        solution: ${{ fromJSON(needs.discover.outputs.solutions) }}
+    name: deploy (${{ matrix.solution.dir }})
+    env:
+      SOL_DIR: ${{ matrix.solution.dir }}
+      STACK: ${{ matrix.solution.stack_base }}-${{ github.ref_name == 'main' && 'prod' || 'dev' }}
+      TEMPLATE: ${{ matrix.solution.template }}
+      PARAMS: ${{ matrix.solution.parameters }}
+      CAPS: ${{ join(matrix.solution.capabilities, ' ') }}
+      DOMAIN: ${{ matrix.solution.domain }}
+      COMPONENT: ${{ matrix.solution.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { fetch-depth: 0 }
+
+      # PROD: to, co idzie na prod, musi byc identyczne z tym, co stoi na dev.
+      - name: assert parity with dev
+        if: github.ref_name == 'main'
+        run: |
+          git fetch --no-tags --quiet origin dev
+          if ! git diff --quiet origin/dev HEAD -- "$SOL_DIR"; then
+            echo "::error::$SOL_DIR na main rozni sie od dev - zmiana nie przeszla przez dev"; exit 1
+          fi
+          echo "OK: $SOL_DIR identyczny z dev"
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd   # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.ACCOUNT }}:role/cloudops-cicd-deploy-${{ env.TARGET }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}
+
+      # ---- CloudFormation ----
+      - name: cfn-lint
+        if: matrix.solution.tool == 'cloudformation'
+        run: pip install --quiet cfn-lint==1.57.0 && cfn-lint "$SOL_DIR/$TEMPLATE"
+      - name: cloudformation deploy
+        if: matrix.solution.tool == 'cloudformation'
+        run: |
+          PARAMS_FILE="$SOL_DIR/${PARAMS//\{env\}/$TARGET}"
+          ARGS=(--stack-name "$STACK" --template-file "$SOL_DIR/$TEMPLATE"
+                --role-arn "arn:aws:iam::${ACCOUNT}:role/cloudops-cicd-cfn-exec-${TARGET}"
+                --no-fail-on-empty-changeset
+                --tags Environment="$TARGET" Domain="$DOMAIN" Component="$COMPONENT"
+                       ManagedBy=github-actions Repo="$GITHUB_REPOSITORY" Commit="$GITHUB_SHA")
+          [ -n "$PARAMS" ] && [ -f "$PARAMS_FILE" ] && ARGS+=(--parameter-overrides "file://$PARAMS_FILE")
+          [ -n "$CAPS" ] && ARGS+=(--capabilities $CAPS)
+          aws cloudformation deploy "${ARGS[@]}"
+
+      # ---- SAM ----
+      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310   # v3
+        if: matrix.solution.tool == 'sam'
+        with: { use-installer: true }
+      - name: sam deploy
+        if: matrix.solution.tool == 'sam'
+        working-directory: ${{ matrix.solution.dir }}
+        run: |
+          sam validate --lint
+          sam build                                  # hash kodu -> klucz S3; zero recznego bumpowania
+          sam deploy --config-env "$TARGET" --no-confirm-changeset --no-fail-on-empty-changeset \
+            --stack-name "$STACK" --region "$AWS_REGION" \
+            --s3-bucket "cloudops-artifacts-${ACCOUNT}-${AWS_REGION}" --s3-prefix "$STACK" \
+            --role-arn "arn:aws:iam::${ACCOUNT}:role/cloudops-cicd-cfn-exec-${TARGET}" \
+            --capabilities $CAPS \
+            --tags "Environment=$TARGET Domain=$DOMAIN Component=$COMPONENT ManagedBy=github-actions Repo=$GITHUB_REPOSITORY Commit=$GITHUB_SHA"
