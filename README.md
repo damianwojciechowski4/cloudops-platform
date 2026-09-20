@@ -8,14 +8,27 @@
 
 ## Status
 
+> Realizowany jest **uproszczony plan** ([plan](docs/superpowers/plans/2026-09-17-cicd-platform-plan.md), [RUNBOOK](docs/superpowers/RUNBOOK.md)): 1 stack bootstrapu per konto, 2 role (`cicd-deploy-<env>`, `cicd-cfn-exec-<env>`), tylko CloudFormation + SAM (bez Terraforma). Sekcje SPRINT 1–6 poniżej opisują wcześniejszą, pełną wersję (6 stacków, `tf`/`cfn`/`sam` per tool) i **nie odzwierciedlają aktualnego stanu** — do uzgodnienia/przepisania.
+
 | | Stan |
 |---|---|
 | Narzędzia (`aws`, `sam`, `gh`, `cfn-lint`) | gotowe |
 | Konta AWS i profile SSO | gotowe |
-| Repo `cloudops-platform`, branch `main`, struktura tool-first | gotowe |
-| **Bootstrap OIDC (6 stacków)** | **← następny krok** |
-| Konfiguracja GitHuba (środowiska, ochrona, zmienne) | do zrobienia |
-| Workflowy i pierwszy przelot | do zrobienia |
+| Repo `cloudops-platform`, branch `main` + `dev`, struktura tool-first | gotowe |
+| Bootstrap OIDC (1 stack/konto: provider, bucket, boundary, `cfn-exec`, `deploy`) | gotowe na dev + prod |
+| Kanarek (`cloudformation/networking/ssm-smoke`) | gotowe |
+| `discover-solutions.py` + testy (5 passed) | gotowe |
+| Zmienne repo GH (`AWS_REGION`, `DEV_ACCOUNT_ID`, `PROD_ACCOUNT_ID`) | gotowe |
+| `deploy.yml` (`discover` + `deploy`, CFN + SAM) | gotowe, pierwszy deploy na DEV zielony |
+| **SAM `hello` (Lambda smoke)** | **← następny krok** |
+| Konfiguracja GitHuba (środowiska, ochrona branchy, `approve-prod.sh`) | do zrobienia (tydzień 3) |
+| Pełny przelot dev → main → prod, testy negatywne N1–N8 | do zrobienia (tydzień 3) |
+
+**Znane incydenty:**
+
+| Data | Co | Przyczyna | Naprawa |
+|---|---|---|---|
+| 2026-09-20 | Pierwszy deploy DEV: `AccessDenied` na `iam:PassRole` (`deploy` → `cfn-exec`) | `CicdBoundary` → `DenyCicdIdentityTampering` miał `Action: iam:*`, co obejmowało też `PassRole`; jawny deny z boundary bije jawny allow z roli | Zawężono deny do konkretnych akcji tamperingu (Create/Update/Delete/Attach/Detach/Put na rolach/politykach), wyłączono `PassRole`/`Get*`/`List*`. Bootstrap zredeployowany na dev+prod. |
 
 ---
 
