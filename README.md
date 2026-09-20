@@ -29,8 +29,6 @@ Implementation follows a simplified plan: one bootstrap stack per account, two r
 | Date | What | Cause | Fix |
 |---|---|---|---|
 | 2026-09-20 | First DEV deploy: `AccessDenied` on `iam:PassRole` (`deploy` → `cfn-exec`) | `CicdBoundary` → `DenyCicdIdentityTampering` used `Action: iam:*`, which also covered `PassRole`; an explicit deny in a permissions boundary always beats an explicit allow on the role | Narrowed the deny to actual tampering actions (Create/Update/Delete/Attach/Detach/Put on roles/policies), excluded `PassRole`/`Get*`/`List*`. Bootstrap redeployed on dev + prod. |
-| 2026-09-20 | AWS account IDs committed in plaintext (`docs/notes/week1_check.md`), already pushed to the public repo | Raw output of verification commands pasted into a note without redaction | Purged the file from full git history with `git filter-repo`, force-pushed `main`/`dev`. Account IDs are not credentials, but the project's own rule is to keep them out of the code. |
-
 ---
 
 ## 1. Reference: accounts, naming, solution paths
