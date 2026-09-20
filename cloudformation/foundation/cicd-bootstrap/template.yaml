@@ -1,0 +1,257 @@
+### 1.3 Szablon bootstrapu (3 h)
+
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  cloudops CI/CD bootstrap - jeden stack na konto. Provider OIDC, bucket artefaktow,
+  permissions boundary, rola wykonawcza CloudFormation, rola deploy dla deploy.yml.
+
+Parameters:
+  GitHubOwner:    { Type: String, Default: damianwojciechowski4 }
+  GitHubOwnerId:  { Type: String, Default: '110458027' }
+  GitHubRepoName: { Type: String, Default: cloudops-platform }
+  GitHubRepoId:   { Type: String, Default: '1372053150' }
+  EnvName:        { Type: String, AllowedValues: [dev, prod] }
+  NamePrefix:     { Type: String, Default: cloudops }
+  DeployBranch:   { Type: String, AllowedValues: [dev, main] }   # dev -> dev, prod -> main
+
+Resources:
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]   # wymagane przez CFN, ignorowane przez AWS dla GitHuba
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${NamePrefix}-artifacts-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-noncurrent
+            Status: Enabled
+            NoncurrentVersionExpiration: { NoncurrentDays: 30 }
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }
+      Tags:
+        - { Key: Environment, Value: !Ref EnvName }
+        - { Key: Domain, Value: cicd }
+        - { Key: ManagedBy, Value: manual-cli }
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt ArtifactsBucket.Arn, !Sub '${ArtifactsBucket.Arn}/*']
+            Condition: { Bool: { 'aws:SecureTransport': 'false' } }
+
+  # Sufit dla wszystkiego, czym pipeline jest i co tworzy.
+  CicdBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: !Sub '${NamePrefix}-cicd-boundary-${EnvName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowInRegions
+            Effect: Allow
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: [eu-central-1, us-east-1]   # us-east-1 tylko dla uslug globalnych
+          - Sid: DenyOrgAccountBillingIdentity
+            Effect: Deny
+            Action:
+              - organizations:*
+              - account:*
+              - billing:*
+              - aws-portal:*
+              - iam:CreateUser
+              - iam:CreateAccessKey
+              - iam:CreateLoginProfile
+              - iam:UpdateLoginProfile
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider
+              - iam:UpdateOpenIDConnectProviderThumbprint
+              - iam:AddClientIDToOpenIDConnectProvider
+              - iam:RemoveClientIDFromOpenIDConnectProvider
+              - iam:CreateSAMLProvider
+              - iam:DeleteSAMLProvider
+            Resource: '*'
+          - Sid: DenyBootstrapStack          # pipeline nie dotyka stacka, z ktorego powstaje
+            Effect: Deny
+            Action: cloudformation:*
+            Resource: !Sub 'arn:aws:cloudformation:*:${AWS::AccountId}:stack/${NamePrefix}-cicd-bootstrap*/*'
+          - Sid: DenyCicdIdentityTampering   # ani rol/polityk CI/CD
+            Effect: Deny
+            Action: iam:*
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${NamePrefix}-cicd-*'
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${NamePrefix}-cicd-*'
+          - Sid: DenyRemovingBoundary
+            Effect: Deny
+            Action: [iam:DeleteRolePermissionsBoundary, iam:DeleteUserPermissionsBoundary]
+            Resource: '*'
+          - Sid: DenyRoleWithoutBoundary     # kazda rola stworzona przez pipeline dziedziczy sufit
+            Effect: Deny
+            Action: [iam:CreateRole, iam:PutRolePolicy, iam:AttachRolePolicy, iam:PutRolePermissionsBoundary]
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                iam:PermissionsBoundary: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${NamePrefix}-cicd-boundary-${EnvName}'
+
+  # Jedyna tozsamosc, ktora TWORZY zasoby. Przyjmuje ja CloudFormation, nie GitHub.
+  CfnExecRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub '${NamePrefix}-cicd-cfn-exec-${EnvName}'
+      PermissionsBoundary: !Ref CicdBoundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess        # dlug: zawezenie na danych CloudTrail
+      Policies:
+        - PolicyName: iam-scoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageCloudopsRoles      # PowerUserAccess nie ma IAM; Lambdy z SAM potrzebuja rol
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateRoleDescription
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:PutRolePermissionsBoundary
+                  - iam:PassRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${NamePrefix}-*'
+              - Sid: ManageCloudopsPolicies
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:TagPolicy
+                  - iam:UntagPolicy
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${NamePrefix}-*'
+              - Sid: IamHousekeeping
+                Effect: Allow
+                Action:
+                  - iam:ListRoles
+                  - iam:ListPolicies
+                  - iam:GetInstanceProfile
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:CreateServiceLinkedRole
+                Resource: '*'
+      Tags:
+        - { Key: Environment, Value: !Ref EnvName }
+        - { Key: Domain, Value: cicd }
+        - { Key: ManagedBy, Value: manual-cli }
+
+  # Rola dla GitHub Actions. Przyjmowana WYLACZNIE z deploy.yml na jednej galezi, w jednym environment.
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${NamePrefix}-cicd-deploy-${EnvName}'
+      Description: !Sub 'deploy.yml z galezi ${DeployBranch}, environment ${EnvName}'
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !Ref CicdBoundary
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !Ref GitHubOidcProvider }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  !Sub 'repo:${GitHubOwner}@${GitHubOwnerId}/${GitHubRepoName}@${GitHubRepoId}:environment:${EnvName}'
+                token.actions.githubusercontent.com:job_workflow_ref:
+                  !Sub '${GitHubOwner}/${GitHubRepoName}/.github/workflows/deploy.yml@refs/heads/${DeployBranch}'
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudopsStacks
+                Effect: Allow
+                Action: cloudformation:*
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${NamePrefix}-*/*'
+              - Sid: TemplateOps
+                Effect: Allow
+                Action: [cloudformation:ValidateTemplate, cloudformation:GetTemplateSummary, cloudformation:ListStacks]
+                Resource: '*'
+              - Sid: Artifacts
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:ListBucket]
+                Resource: [!GetAtt ArtifactsBucket.Arn, !Sub '${ArtifactsBucket.Arn}/*']
+              - Sid: PassExecRoleToCloudFormationOnly
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CfnExecRole.Arn
+                Condition:
+                  StringEquals: { 'iam:PassedToService': cloudformation.amazonaws.com }
+              - Sid: ReadCloudopsParameters
+                Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${NamePrefix}/*'
+      Tags:
+        - { Key: Environment, Value: !Ref EnvName }
+        - { Key: Domain, Value: cicd }
+        - { Key: ManagedBy, Value: manual-cli }
+
+Outputs:
+  DeployRoleArn:       { Value: !GetAtt DeployRole.Arn }
+  ExecRoleArn:         { Value: !GetAtt CfnExecRole.Arn }
+  ArtifactsBucketName: { Value: !Ref ArtifactsBucket }
