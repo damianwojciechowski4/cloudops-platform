@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Kanarek pipeline'u - jeden parametr SSM, koszt 0. Zmieniaj CanaryValue przy kazdym przelocie.
+Description: Kanarek pipeline'u - jeden parametr SSM, koszt 0. Zmieniaj CanaryValue przy kazdym przelocie CI/CD.
 Parameters:
   EnvName:     { Type: String, AllowedValues: [dev, prod] }
   CanaryValue: { Type: String, Default: v1 }
