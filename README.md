@@ -62,6 +62,28 @@
 
 ---
 
+## Konwencje
+
+- **Gałęzie:** robocze zawsze z `dev` (`feat/<domena>-<opis>`), bez sufiksów środowiska — środowisko wynika z tego, dokąd gałąź trafia, nie z jej nazwy.
+- **Merge:** `feat/* → dev` zawsze **squash** (historia `dev` liniowa); `dev → main` zawsze **merge commit** (widać punkty promocji do prod).
+- **Lambda wyłącznie przez SAM** — nigdy gołym CloudFormation. SAM daje `sam build`/`sam deploy` z hashem kodu jako kluczem S3, więc nie ma ręcznego bumpowania wersji artefaktu.
+- **Pętla robocza** (branch → dev → main → prod):
+
+  ```bash
+  git switch dev && git pull --ff-only
+  git switch -c feat/net-<opis>
+  # zmiana w jednym rozwiązaniu
+  python3 scripts/discover-solutions.py dev HEAD          # sanity: 1 pozycja
+  git commit -m "feat(net): <opis w trybie rozkazującym>"
+  git push -u origin feat/net-<opis>
+  gh pr create --base dev --fill && gh pr merge --squash --delete-branch   # → deploy DEV
+  gh run watch
+  gh pr create --base main --head dev --fill && gh pr merge --merge        # → deploy PROD czeka
+  ./scripts/approve-prod.sh
+  ```
+
+---
+
 ## SPRINT 1 — Fundament CI/CD (W1–W2)
 
 ### Tydzień 1 — Bootstrap, 6 stacków
