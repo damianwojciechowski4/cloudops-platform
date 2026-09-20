@@ -1,0 +1,4 @@
+[
+  { "ParameterKey": "EnvName",     "ParameterValue": "prod" },
+  { "ParameterKey": "CanaryValue", "ParameterValue": "v1" }
+]

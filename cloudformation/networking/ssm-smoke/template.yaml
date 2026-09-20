@@ -1,0 +1,14 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kanarek pipeline'u - jeden parametr SSM, koszt 0. Zmieniaj CanaryValue przy kazdym przelocie.
+Parameters:
+  EnvName:     { Type: String, AllowedValues: [dev, prod] }
+  CanaryValue: { Type: String, Default: v1 }
+Resources:
+  Canary:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/cloudops/${EnvName}/net/canary'
+      Type: String
+      Value: !Ref CanaryValue
+Outputs:
+  CanaryName: { Value: !Ref Canary }
