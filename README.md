@@ -1,427 +1,134 @@
-# Plan działań: cloudops-platform
+# cloudops-platform
 
-**Repo platformy:** `damianwojciechowski4/cloudops-platform` (publiczne, `main`, pod ochroną)
-**Repo piaskownica:** `damianwojciechowski4/AWS-Projects` (bez ochrony, eksperymenty)
-**Region:** `eu-central-1` · **Budżet:** 6–10 h/tydzień · < 5 USD/mies. per konto
+**Platform repo:** `damianwojciechowski4/cloudops-platform` (public, `main`, protected)
+**Sandbox repo:** `damianwojciechowski4/AWS-Projects` (unprotected, experiments)
+**Region:** `eu-central-1` · **Budget:** 6–10 h/week · < 5 USD/month per account
 
 ---
 
 ## Status
 
-> Realizowany jest **uproszczony plan** ([plan](docs/superpowers/plans/2026-09-17-cicd-platform-plan.md), [RUNBOOK](docs/superpowers/RUNBOOK.md)): 1 stack bootstrapu per konto, 2 role (`cicd-deploy-<env>`, `cicd-cfn-exec-<env>`), tylko CloudFormation + SAM (bez Terraforma). Sekcje SPRINT 1–6 poniżej opisują wcześniejszą, pełną wersję (6 stacków, `tf`/`cfn`/`sam` per tool) i **nie odzwierciedlają aktualnego stanu** — do uzgodnienia/przepisania.
+Implementation follows a simplified plan: one bootstrap stack per account, two roles (`cicd-deploy-<env>`, `cicd-cfn-exec-<env>`), CloudFormation + SAM only — no Terraform.
 
-| | Stan |
+| | State |
 |---|---|
-| Narzędzia (`aws`, `sam`, `gh`, `cfn-lint`) | gotowe |
-| Konta AWS i profile SSO | gotowe |
-| Repo `cloudops-platform`, branch `main` + `dev`, struktura tool-first | gotowe |
-| Bootstrap OIDC (1 stack/konto: provider, bucket, boundary, `cfn-exec`, `deploy`) | gotowe na dev + prod |
-| Kanarek (`cloudformation/networking/ssm-smoke`) | gotowe |
-| `discover-solutions.py` + testy (5 passed) | gotowe |
-| Zmienne repo GH (`AWS_REGION`, `DEV_ACCOUNT_ID`, `PROD_ACCOUNT_ID`) | gotowe |
-| `deploy.yml` (`discover` + `deploy`, CFN + SAM) | gotowe, pierwszy deploy na DEV zielony |
-| **SAM `hello` (Lambda smoke)** | **← następny krok** |
-| Konfiguracja GitHuba (środowiska, ochrona branchy, `approve-prod.sh`) | do zrobienia (tydzień 3) |
-| Pełny przelot dev → main → prod, testy negatywne N1–N8 | do zrobienia (tydzień 3) |
+| Tooling (`aws`, `sam`, `gh`, `cfn-lint`) | done |
+| AWS accounts and SSO profiles | done |
+| Repo `cloudops-platform`, `main` + `dev` branches, tool-first layout | done |
+| Bootstrap OIDC (1 stack/account: provider, bucket, boundary, `cfn-exec`, `deploy`) | done on dev + prod |
+| Canary (`cloudformation/networking/ssm-smoke`) | done |
+| `discover-solutions.py` + tests (5 passed) | done |
+| GH repo variables (`AWS_REGION`, `DEV_ACCOUNT_ID`, `PROD_ACCOUNT_ID`) | done |
+| `deploy.yml` (`discover` + `deploy`, CFN + SAM) | done, first DEV deploy green |
+| **SAM `hello` (Lambda smoke test)** | **← next step** |
+| GitHub configuration (environments, branch protection, `approve-prod.sh`) | pending (week 3) |
+| Full dev → main → prod run, negative tests N1–N8 | pending (week 3) |
 
-**Znane incydenty:**
+**Known incidents:**
 
-| Data | Co | Przyczyna | Naprawa |
+| Date | What | Cause | Fix |
 |---|---|---|---|
-| 2026-09-20 | Pierwszy deploy DEV: `AccessDenied` na `iam:PassRole` (`deploy` → `cfn-exec`) | `CicdBoundary` → `DenyCicdIdentityTampering` miał `Action: iam:*`, co obejmowało też `PassRole`; jawny deny z boundary bije jawny allow z roli | Zawężono deny do konkretnych akcji tamperingu (Create/Update/Delete/Attach/Detach/Put na rolach/politykach), wyłączono `PassRole`/`Get*`/`List*`. Bootstrap zredeployowany na dev+prod. |
+| 2026-09-20 | First DEV deploy: `AccessDenied` on `iam:PassRole` (`deploy` → `cfn-exec`) | `CicdBoundary` → `DenyCicdIdentityTampering` used `Action: iam:*`, which also covered `PassRole`; an explicit deny in a permissions boundary always beats an explicit allow on the role | Narrowed the deny to actual tampering actions (Create/Update/Delete/Attach/Detach/Put on roles/policies), excluded `PassRole`/`Get*`/`List*`. Bootstrap redeployed on dev + prod. |
+| 2026-09-20 | AWS account IDs committed in plaintext (`docs/notes/week1_check.md`), already pushed to the public repo | Raw output of verification commands pasted into a note without redaction | Purged the file from full git history with `git filter-repo`, force-pushed `main`/`dev`. Account IDs are not credentials, but the project's own rule is to keep them out of the code. |
 
 ---
 
-## 1. Referencja: konta, nazwy, ścieżki
+## 1. Reference: accounts, naming, solution paths
 
-### Konta
+### Accounts
 
-| Konto | ID | Profil | Rola |
+| Account | ID | Profile | Role |
 |---|---|---|---|
-| `GENERAL` | `$GENERAL_ACCOUNT` | `cloudops-general` | Organizations, SSO, billing, SCP. **Zero workloadów.** |
-| `DEVELOPMENT` | `$DEVELOPMENT_ACCOUNT` | `cloudops-development` | środowisko dev |
-| `PRODUCTION` | `$PRODUCTION_ACCOUNT` | `cloudops-production` | środowisko prod + hub sieciowy |
+| `GENERAL` | `$GENERAL_ACCOUNT` | `cloudops-general` | Organizations, SSO, billing, SCPs. **Zero workloads.** |
+| `DEVELOPMENT` | `$DEV_ACCOUNT` | `cloudops-development` | dev environment |
+| `PRODUCTION` | `$PROD_ACCOUNT` | `cloudops-production` | prod environment |
 
+### Naming
 
-
-### Nazwy
-
-| Typ | Wzorzec | Przykład |
+| Type | Pattern | Example |
 |---|---|---|
-| Rola plan | `cloudops-cicd-<tool>-plan-<env>` | `cloudops-cicd-tf-plan-prod` |
-| Rola apply/deploy | `cloudops-cicd-<tool>-apply-<env>` | `cloudops-cicd-tf-apply-prod` |
-| Rola wykonawcza CFN | `cloudops-cicd-cfn-exec-<env>` | wspólna dla CFN i SAM |
-| Stack bootstrapu | `cloudops-cicd-bootstrap-<tool>` | `cloudops-cicd-bootstrap-sam` |
-| Stack komponentu | `cloudops-<domena>-<nazwa>-<env>` | `cloudops-net-vpc-prod` |
-| Bucket stanu | `cloudops-tfstate-<account-id>-<region>` | — |
-| Bucket artefaktów | `cloudops-artifacts-<account-id>-<region>` | — |
-| Klucz stanu TF | `<domena>/<nazwa>/<env>/terraform.tfstate` | `networking/vpc/prod/terraform.tfstate` |
+| Bootstrap stack | `cloudops-cicd-bootstrap` | one per account (env is a parameter, not a name suffix) |
+| Deploy role (assumed by GitHub Actions) | `cloudops-cicd-deploy-<env>` | `cloudops-cicd-deploy-prod` |
+| Exec role (assumed by CloudFormation) | `cloudops-cicd-cfn-exec-<env>` | shared by CloudFormation and SAM |
+| Permissions boundary | `cloudops-cicd-boundary-<env>` | ceiling for everything the pipeline is and creates |
+| Solution stack | `cloudops-<domain>-<name>-<env>` | `cloudops-net-ssm-smoke-dev` |
+| Artifacts bucket | `cloudops-artifacts-<account-id>-<region>` | SAM build artifacts |
 
-`<tool>` ∈ `tf`, `cfn`, `sam`. Środowiska wyłącznie `dev` i `prod` — te łańcuchy są wbudowane w claim `sub`.
+Environments are exclusively `dev` and `prod` — these strings are baked into the OIDC `sub` claim.
 
-### Ścieżki rozwiązań
+### Solution paths
 
-| Rozwiązanie | Ścieżka | `order` |
+Each deployable unit is a directory with a `.solution.yml` under `cloudformation/` or `sam/` (never under `foundation/` — that's bootstrap, deployed manually from a laptop).
+
+| Solution | Path | `order` |
 |---|---|---|
-| VPC | `terraform/networking/vpc` | 10 |
-| TGW | `terraform/networking/tgw` | 20 |
-| Egress | `terraform/networking/egress` | 25 |
-| Route 53 Resolver | `terraform/networking/resolver` | 30 |
-| EC2 | `terraform/platform/ec2` | 50 |
-| ALB | `terraform/platform/alb` | 55 |
-| Flow Logs | `terraform/observability/flow-logs` | 80 |
-| Produkt SC „VPC" | `cloudformation/service-catalog/products/vpc` | 10 |
-| Lambda IPAM | `sam/networking/ipam-allocator` | 10 |
+| CI/CD bootstrap (manual, not discovered) | `cloudformation/foundation/cicd-bootstrap` | — |
+| Pipeline canary | `cloudformation/networking/ssm-smoke` | 10 |
+| Lambda smoke test | `sam/networking/hello` | 20 |
 
 ---
 
-## Konwencje
+## Conventions
 
-- **Gałęzie:** robocze zawsze z `dev` (`feat/<domena>-<opis>`), bez sufiksów środowiska — środowisko wynika z tego, dokąd gałąź trafia, nie z jej nazwy.
-- **Merge:** `feat/* → dev` zawsze **squash** (historia `dev` liniowa); `dev → main` zawsze **merge commit** (widać punkty promocji do prod).
-- **Lambda wyłącznie przez SAM** — nigdy gołym CloudFormation. SAM daje `sam build`/`sam deploy` z hashem kodu jako kluczem S3, więc nie ma ręcznego bumpowania wersji artefaktu.
-- **Pętla robocza** (branch → dev → main → prod):
+- **Branches:** feature work always branches from `dev` (`feat/<domain>-<description>`), no environment suffixes — the environment is determined by where the branch lands, not by its name.
+- **Merge:** `feat/* → dev` is always **squash** (linear `dev` history); `dev → main` is always **merge commit** (visible promotion points to prod).
+- **Lambda exclusively through SAM** — never raw CloudFormation. SAM gives `sam build`/`sam deploy` with a code hash as the S3 key, so there's no manual artifact version bumping.
+- **Working loop** (branch → dev → main → prod):
 
   ```bash
   git switch dev && git pull --ff-only
-  git switch -c feat/net-<opis>
-  # zmiana w jednym rozwiązaniu
-  python3 scripts/discover-solutions.py dev HEAD          # sanity: 1 pozycja
-  git commit -m "feat(net): <opis w trybie rozkazującym>"
-  git push -u origin feat/net-<opis>
-  gh pr create --base dev --fill && gh pr merge --squash --delete-branch   # → deploy DEV
+  git switch -c feat/net-<description>
+  # change in one solution
+  python3 scripts/discover-solutions.py dev HEAD          # sanity: 1 entry
+  git commit -m "feat(net): <imperative description>"
+  git push -u origin feat/net-<description>
+  gh pr create --base dev --fill && gh pr merge --squash --delete-branch   # -> DEV deploy
   gh run watch
-  gh pr create --base main --head dev --fill && gh pr merge --merge        # → deploy PROD czeka
+  gh pr create --base main --head dev --fill && gh pr merge --merge        # -> PROD deploy waits
   ./scripts/approve-prod.sh
   ```
 
 ---
 
-## SPRINT 1 — Fundament CI/CD (W1–W2)
+## 2. How deployment works
 
-### Tydzień 1 — Bootstrap, 6 stacków
-
-Szablon `cloudformation/foundation/cicd-bootstrap/template.yaml` przyjmuje parametry:
-
-| Parametr | Rola |
-|---|---|
-| `GitHubRepo` | `damianwojciechowski4/cloudops-platform` |
-| `EnvName` | `dev` \| `prod` — wchodzi w claim `sub` |
-| `NamePrefix` | `cloudops` |
-| `ToolShort` | `tf` \| `cfn` \| `sam` — wchodzi w nazwy ról |
-| `WorkflowFile` | `terraform.yml` \| `cloudformation.yml` \| `sam.yml` — wchodzi w `job_workflow_ref` |
-| `CreateShared` | `true` tylko przy pierwszym przebiegu na koncie (provider OIDC, buckety) |
-
-Trust policy roli apply — dwa claimy naraz:
-
-```yaml
-Condition:
-  StringEquals:
-    token.actions.githubusercontent.com:aud: sts.amazonaws.com
-    token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepo}:environment:${EnvName}'
-    token.actions.githubusercontent.com:job_workflow_ref: !Sub
-      '${GitHubRepo}/.github/workflows/${WorkflowFile}@refs/heads/main'
-```
-
-Zasoby współdzielone (`CreateShared=true`) owinięte w `Condition` i z `DeletionPolicy: Retain`: provider OIDC, `cloudops-tfstate-*`, `cloudops-artifacts-*`, rola `cloudops-cicd-cfn-exec-<env>`.
-
-**Pre-flight, obowiązkowo:**
-
-```bash
-assert_account() {
-  local p=$1 e=$2 a
-  a=$(aws sts get-caller-identity --profile "$p" --query Account --output text)
-  [[ "$a" == "$e" ]] || { echo "STOP: $p -> $a, oczekiwano $e"; return 1; }
-  echo "OK: $p -> $a"
-}
-assert_account "$PROFILE_DEV" "$DEV_ACCOUNT"
-assert_account "$PROFILE_PROD" "$PROD_ACCOUNT"
-```
-
-**Deploy:**
-
-```bash
-for PAIR in "$PROFILE_DEV:dev" "$PROFILE_PROD:prod"; do
-  PROFILE="${PAIR%%:*}"; ENV="${PAIR##*:}"
-  FIRST=true
-  for TOOL in tf:terraform.yml cfn:cloudformation.yml sam:sam.yml; do
-    SHORT="${TOOL%%:*}"; FILE="${TOOL##*:}"
-    echo "=== $PROFILE / $ENV / $SHORT (shared=$FIRST) ==="
-    aws cloudformation deploy \
-      --profile "$PROFILE" --region "$REGION" \
-      --stack-name "${PREFIX}-cicd-bootstrap-${SHORT}" \
-      --template-file cloudformation/foundation/cicd-bootstrap/template.yaml \
-      --capabilities CAPABILITY_NAMED_IAM \
-      --no-fail-on-empty-changeset \
-      --parameter-overrides \
-          GitHubRepo="$REPO" EnvName="$ENV" NamePrefix="$PREFIX" \
-          ToolShort="$SHORT" WorkflowFile="$FILE" CreateShared="$FIRST" \
-      --tags Environment="$ENV" Domain=cicd ManagedBy=manual-cli Repo=cloudops-platform
-    FIRST=false
-  done
-done
-```
-
-**Budżety z konta GENERAL:**
-
-```bash
-for PAIR in "development:$DEV_ACCOUNT" "production:$PROD_ACCOUNT"; do
-  NAME="${PAIR%%:*}"; ACC="${PAIR##*:}"
-  cat > /tmp/budget.json <<EOF
-{ "BudgetName": "${PREFIX}-limit-${NAME}",
-  "BudgetLimit": {"Amount": "5", "Unit": "USD"},
-  "TimeUnit": "MONTHLY", "BudgetType": "COST",
-  "CostFilters": { "LinkedAccount": ["$ACC"] } }
-EOF
-  aws budgets create-budget --profile "$PROFILE_GENERAL" \
-    --account-id "$GENERAL_ACCOUNT" \
-    --budget file:///tmp/budget.json \
-    --notifications-with-subscribers file:///tmp/notif.json
-done
-```
-
-**Weryfikacja:**
-
-```bash
-# Dokladnie jeden provider OIDC na konto
-aws iam list-open-id-connect-providers --profile "$PROFILE_PROD"
-
-# Oba claimy w roli produkcyjnej Terraforma, zero gwiazdek w sub
-aws iam get-role --role-name cloudops-cicd-tf-apply-prod --profile "$PROFILE_PROD" \
-  --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals' --output json
-
-# Trzy rozne job_workflow_ref w trzech rolach
-for T in tf cfn sam; do
-  echo -n "$T: "
-  aws iam get-role --role-name "cloudops-cicd-${T}-apply-prod" --profile "$PROFILE_PROD" \
-    --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals."token.actions.githubusercontent.com:job_workflow_ref"' \
-    --output text
-done
-```
-
-| Zadanie | Czas |
-|---|---|
-| `.envrc` + `direnv`, `assert_account` | 0,5 h |
-| Szablon bootstrapu z 6 parametrami i `Condition` na zasobach współdzielonych | 3 h |
-| Pętla 2 × 3, weryfikacja | 1,5 h |
-| Budżety z GENERAL | 1 h |
-
-**DoD W1:** sześć stacków `cloudops-cicd-bootstrap-{tf,cfn,sam}` zielonych; dokładnie jeden provider OIDC na konto; trzy role apply na prod mają trzy różne `job_workflow_ref`; w `GENERAL` nic poza budżetami.
-
-### Tydzień 2 — GitHub, workflowy, pierwszy przelot
-
-```bash
-gh variable set AWS_REGION         --body "$REGION"
-gh variable set DEV_ACCOUNT_ID     --body "$DEV_ACCOUNT"
-gh variable set PROD_ACCOUNT_ID    --body "$PROD_ACCOUNT"
-gh variable set GENERAL_ACCOUNT_ID --body "$GENERAL_ACCOUNT"
-
-# srodowisko dev: tylko feat/* i main
-gh api -X PUT "repos/$REPO/environments/dev" --input - <<'EOF'
-{ "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
-EOF
-gh api -X POST "repos/$REPO/environments/dev/deployment-branch-policies" -f name='feat/*'
-gh api -X POST "repos/$REPO/environments/dev/deployment-branch-policies" -f name='main'
-
-# srodowisko prod: reviewer + tylko chronione branche
-MY_ID=$(gh api user --jq .id)
-gh api -X PUT "repos/$REPO/environments/prod" --input - <<EOF
-{ "wait_timer": 0,
-  "reviewers": [{"type": "User", "id": $MY_ID}],
-  "deployment_branch_policy": { "protected_branches": true, "custom_branch_policies": false } }
-EOF
-
-# ochrona main
-gh api -X PUT "repos/$REPO/branches/main/protection" --input - <<'EOF'
-{ "required_status_checks": { "strict": false, "contexts": ["prod-plan-gate"] },
-  "enforce_admins": false, "required_pull_request_reviews": null, "restrictions": null,
-  "allow_force_pushes": false, "allow_deletions": false, "required_linear_history": true }
-EOF
-```
-
-**Filtry ścieżek — bootstrap musi być wykluczony:**
-
-```yaml
-# cloudformation.yml
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'cloudformation/**'
-      - '!cloudformation/foundation/**'     # deploy z laptopa, nie z CI
-```
-
-Bez tego pipeline próbowałby wdrożyć bootstrap rolą, która z tego bootstrapu dopiero powstaje.
-
-| Zadanie | Czas |
-|---|---|
-| Zmienne, środowiska, ochrona `main` przez `gh api` | 1 h |
-| `scripts/discover-solutions.py` + test lokalny | 1 h |
-| `terraform.yml` z jobami `discover` → `dev-apply` → `prod-plan` → `prod-plan-gate` → `prod-apply` | 2,5 h |
-| `cloudformation.yml` i `sam.yml` jako warianty | 1,5 h |
-| `scripts/approve-prod.sh` | 0,5 h |
-| Pierwszy przelot: `aws_ssm_parameter` w `terraform/networking/vpc` | 2 h |
-| Test negatywny: workflow SAM-a próbuje przyjąć rolę `cloudops-cicd-tf-apply-prod` | 1 h |
-
-**DoD Sprintu 1:** commit z brancha `feat/net-vpc-init` przeszedł dev → PR → main → prod; `prod-apply` nie startuje po nieudanym `dev-apply`; `discover` wykrył wyłącznie zmienione rozwiązanie; jedyne kliknięcie to `gh auth login`.
-
-**Post:** „Trzy toolchainy w jednym repo, trzy komplety ról OIDC — jak `job_workflow_ref` domyka monorepo".
+- **OIDC, no long-lived credentials.** GitHub Actions authenticates to AWS via `sts:AssumeRoleWithWebIdentity`. The trust policy pins `sub` (owner ID + repo ID + environment) and `job_workflow_ref` (workflow file + branch) — nothing but `deploy.yml`, on the right branch, in the right GitHub environment, can assume the role.
+- **Two roles per environment, split by what they're trusted to do:**
+  - `cloudops-cicd-deploy-<env>` — assumed by GitHub Actions. Can only call `cloudformation:*` on `cloudops-*` stacks, `iam:PassRole` to the exec role (scoped to `iam:PassedToService: cloudformation.amazonaws.com`), and read/write the artifacts bucket.
+  - `cloudops-cicd-cfn-exec-<env>` — assumed by the CloudFormation service. Can actually create resources (`PowerUserAccess` + scoped IAM for `cloudops-*` roles/policies), but is never assumed directly by CI.
+- **A permissions boundary is attached to every role the pipeline creates**, capping what any of it can ever do — including a deny on touching the bootstrap stack itself and on removing the boundary.
+- **`discover-solutions.py`** diffs the two commits behind a push and returns only the solutions (directories with `.solution.yml`) that changed, in `order`. The `deploy` job runs as a matrix over that list, `max-parallel: 1`.
+- **`main` requires parity with `dev`** — before a solution deploys to prod, the workflow diffs that directory between `origin/dev` and the pushed commit. If they differ, the deploy fails: the change skipped promotion through dev.
+- **Prod requires manual approval** via the GitHub `prod` environment's required reviewer (`scripts/approve-prod.sh` approves the pending deployment from the CLI).
 
 ---
 
-## SPRINT 2 — VPC (W3–W4)
+## Foundation that stays
 
-`terraform/networking/vpc`, `.solution.yml` z `order: 10`.
+One OIDC provider per account · two CI/CD roles per account (`deploy`, `cfn-exec`) with a shared permissions boundary · artifacts bucket with `DeletionPolicy: Retain` · GitHub environments and branch protection.
 
-| Zadanie | Czas |
-|---|---|
-| Moduł VPC: subnety public/private per AZ, IGW, tabele tras, `for_each` po AZ | 3 h |
-| Backend S3 `cloudops-tfstate-<acc>-eu-central-1`, `use_lockfile = true`, klucz `networking/vpc/<env>/terraform.tfstate` | 1,5 h |
-| `envs/{dev,prod}` cienkie: tylko `backend.tf`, `providers.tf`, `main.tf`, `terraform.tfvars` | 1 h |
-| Trivy `scan-type: config`, `exit-code: 1`, `severity: HIGH,CRITICAL` | 1 h |
-| `default_tags`: `Environment`, `Domain`, `Component`, `ManagedBy`, `Repo` | 0,5 h |
-| CIDR: dev `10.10.0.0/16`, prod `10.20.0.0/16` | 0,5 h |
-| `terraform destroy` na dev na koniec tygodnia | 0,5 h |
-
-**Bez NAT Gateway.**
-
-**DoD:** `cloudops-net-vpc-dev` i `cloudops-net-vpc-prod` postawione wyłącznie pipelinem; zmiana w module przechodzi całą ścieżkę; `plan` na prod po apply zwraca exitcode 0.
-
-**Post:** „Cienkie `envs/`, grube `modules/` — jak wymusić promocję strukturą repo".
+Everything else — the canary, `hello`, and future solutions — is deletable and expected to be pruned once it's stopped earning its keep.
 
 ---
 
-## SPRINT 3 — Multi-account networking (W5–W6)
+## Known tech debt
 
-`terraform/networking/{tgw,egress}`, `order` 20 i 25 — kolejność wymuszona przez `discover`.
-
-| Zadanie | Czas |
-|---|---|
-| Moduł TGW w `PRODUCTION` jako hubie + `aws_ram_resource_share` do `DEVELOPMENT` | 3 h |
-| Attachmenty VPC z obu kont + akceptacja | 2 h |
-| Segmentacja: osobne tabele tras TGW dla spoke i egress | 2 h |
-| NAT w prod, trasa `0.0.0.0/0` z dev przez TGW | 2 h |
-| Test przepływu potwierdzony w Flow Logs | 1,5 h |
-| Diagram `docs/diagrams/hub-spoke.drawio` + eksport PNG | 1,5 h |
-| **Destroy NAT tego samego dnia** | 0,5 h |
-
-**Trade-off do README:** centralized egress oszczędza NAT-y, ale dokłada 0,02 USD/GB przez TGW w obie strony i tworzy pojedynczy punkt awarii. Policz próg względem NAT per konto.
-
-**DoD:** pakiet z dev wychodzi przez NAT w prod, potwierdzony w Flow Logs; VPC wdraża się przed TGW dzięki `order`; po destroy koszt dzienny wraca do zera.
-
-**Post:** „Centralized egress: kiedy się opłaca, a kiedy przepłacasz za transfer".
+| Item | Why, for now | Payoff |
+|---|---|---|
+| No plan/change-set step before merge | simplicity; reviewer sees the code diff | `plan` job on `pull_request` with a read-only role |
+| Parity check proves identity with `dev`, not success on `dev` | one-line check, no extra API calls | `assert-promoted.sh` against the Actions API |
+| `PowerUserAccess` on `cfn-exec` | the boundary limits the blast radius | narrow it based on CloudTrail data |
+| SSE-S3 instead of KMS; no org CloudTrail; no SCPs; bootstrap without a StackSet | 2 accounts, cost-conscious | later, if the platform grows past 2 accounts |
+| No `cfn-guard`, no signed commits | simplicity | once there's a rule worth enforcing |
+| Pipeline never deletes stacks | safer to do by hand for now | `workflow_dispatch` destroy job with approval |
 
 ---
 
-## SPRINT 4 — CloudFormation + SAM (W7–W8)
+## Roadmap (ideas, not committed work)
 
-Pierwsze użycie dwóch pozostałych toolchainów. `cloudformation/service-catalog/` i `sam/networking/ipam-allocator/`.
+Beyond the current plan, possible future directions — none scheduled, no time estimates, revisit once the foundation above is boring and stable:
 
-| Zadanie | Czas |
-|---|---|
-| Portfolio + produkt „VPC" w `PRODUCTION`, share przez Organizations | 2 h |
-| Launch role w `DEVELOPMENT` przez StackSet z GENERAL, constraint `LocalRoleName` | 2,5 h |
-| Custom resource → Lambda w hubie (`AWS::Lambda::Permission` z `PrincipalOrgID`) | 3 h |
-| Lambda SAM: alokacja CIDR, `cfnresponse` w `try/except`, idempotentny `Delete`, stabilny `PhysicalResourceId` | 3 h |
-| `cfn-lint` + `cfn-guard` z regułą „VPC musi mieć Flow Logs" w `cloudformation.yml` | 1,5 h |
-| `docs/solutions/self-service-vpc.md` spinający kawałki z trzech katalogów | 1 h |
-| Test negatywny: rola z samym `servicecatalog:*` wyklikuje VPC; po odebraniu `s3:GetObject` — odmowa | 1 h |
-
-**DoD:** użytkownik w `DEVELOPMENT` z wyłącznie `servicecatalog:*` tworzy VPC z CIDR-em od Lambdy z hubu; terminacja produktu zwraca CIDR; oba workflowy przeszły przez własne role.
-
-**Post:** „Self-service VPC bez launch constraint to antywzorzec" — z diagramem łańcucha uprawnień.
-
----
-
-## SPRINT 5 — Odporność i obserwowalność (W9–W10)
-
-| Zadanie | Czas |
-|---|---|
-| Endpoint service + NLB w prod, endpoint interfejsowy w dev, test po prywatnym DNS | 3 h |
-| Route 53 Resolver: inbound/outbound, reguły przez RAM (`order: 30`) | 3 h |
-| Flow Logs w Parquet do S3, custom format z `pkt-srcaddr` i `tcp-flags` (`order: 80`) | 2 h |
-| Athena: zapisane zapytania — top talkers, odrzucenia, ruch cross-AZ | 2 h |
-| Alarmy: `BytesDropCountNoRoute` na TGW, błędy Lambdy hub | 1,5 h |
-| Nocny drift detection: EventBridge + SNS | 2 h |
-
-**DoD:** ruch dev → prod przez PrivateLink bez wyjścia do internetu; Athena zwraca top talkers z doby; nocny drift wykrywa ręczną zmianę w konsoli.
-
-**Post:** „Flow Logs w Parquet i trzy zapytania Athena warte zapisania".
-
----
-
-## SPRINT 6 — Skala i hardening (W11–W12)
-
-| Zadanie | Czas |
-|---|---|
-| Bootstrap z pętli 2×3 do StackSetu na OU, delegacja na GENERAL | 3 h |
-| **Zawężenie `cloudops-cicd-cfn-exec-*` z `PowerUserAccess`** na bazie CloudTrail / Access Analyzer | 3 h |
-| IPAM: pula per środowisko, moduł VPC pobiera CIDR z IPAM zamiast ze zmiennej | 3 h |
-| SCP na OU: blokada regionów spoza `eu-central-1` i `us-east-1` | 1,5 h |
-| README per rozwiązanie + diagramy wyeksportowane do PNG | 3 h |
-| Cost Explorer po tagach `Environment` i `ManagedBy` | 1 h |
-
-**DoD:** nowe konto w OU dostaje role bez żadnej akcji; `cloudops-cicd-cfn-exec-prod` bez `PowerUserAccess`; każde rozwiązanie ma README z diagramem i szacunkiem kosztu.
-
-**Post:** „Od PowerUserAccess do polityki z 40 akcjami — zawężanie na danych, nie na przeczuciu".
-
----
-
-## Rytm tygodniowy
-
-**Zestaw 60-minutowy, 3–4×/tydzień:** 20 min teoria (dokumentacja + notatka 5 zdań) · 30 min build/test (jeden commit, jeden PR, zielony pipeline) · 10 min notatka do README lub szkic posta.
-
-**Blok weekendowy 2–4 h:** nowy moduł, debugowanie IAM, diagram.
-
-**Pętla robocza:**
-
-```bash
-git switch main && git pull --ff-only
-git switch -c feat/net-<opis>
-# zmiana w modules/
-python3 scripts/discover-solutions.py terraform main HEAD dev    # sanity check
-git commit -m "feat(net): <opis w trybie rozkazujacym>"
-git push -u origin feat/net-<opis>
-gh run watch                                                     # DEV
-gh pr create --base main --fill && gh pr checks --watch
-gh pr view --comments                                            # plan PROD
-gh pr merge --squash --delete-branch
-gh run watch && ./scripts/approve-prod.sh                        # PROD
-```
-
----
-
-## KPI
-
-| Metryka | Cel tygodniowy |
-|---|---|
-| Godziny | 6–10 |
-| Merge'e do `main` | ≥ 2 |
-| Zielone przeloty prod | ≥ 1 |
-| Testy negatywne (celowa odmowa) | ≥ 1 |
-| Posty | 2 |
-| Koszt AWS | < 1,25 USD/tydzień/konto |
-| Zasoby żyjące po niedzieli 20:00 | 0 poza fundamentem |
-
-**Przegląd miesięczny, 30 min:** Cost Explorer po tagach, usunięcie zasobów z `ManagedBy=manual-cli`, aktualizacja README roota.
-
----
-
-## Fundament, który zostaje na stałe
-
-Provider OIDC (jeden na konto, obsługuje też AWS-Projects) · dziewięć ról CI/CD per konto · buckety stanu i artefaktów z `DeletionPolicy: Retain` · budżety i alarmy · środowiska i ochrona `main`.
-
-Wszystko inne — VPC, TGW, NAT, endpointy — usuwalne jedną komendą i domyślnie usuwane na koniec sesji.
-
----
-
-## Dług techniczny zaplanowany świadomie
-
-| Pozycja | Spłata |
-|---|---|
-| `PowerUserAccess` na `cloudops-cicd-cfn-exec-*` | Sprint 6 |
-| Bootstrap w pętli `for` zamiast StackSetu | Sprint 6 |
-| CIDR ze zmiennej zamiast z IPAM | Sprint 6 |
-| `strict: false` w required status checks | po ustabilizowaniu `prod-plan-gate` |
-
-Wpisz to do `docs/tech-debt.md`. Rekruter czytający repo widzi wtedy świadome decyzje, nie przeoczenia.
+- Multi-account networking (transit gateway / hub-spoke egress) if a second workload account is added.
+- A third top-level tool directory (`terraform/`) if a use case actually needs it — out of scope today.
+- Service Catalog self-service products once there's more than one consumer of the platform.
+- Tighter cost/observability tooling (Flow Logs analysis, drift detection) once there's something worth watching.
