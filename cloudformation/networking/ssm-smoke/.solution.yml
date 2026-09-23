@@ -1,0 +1,6 @@
+domain: net
+name: ssm-smoke
+order: 10
+template: template.yaml
+parameters: params/{env}.json
+capabilities: []

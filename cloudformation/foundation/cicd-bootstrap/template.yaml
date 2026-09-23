@@ -106,9 +106,29 @@ Resources:
             Effect: Deny
             Action: cloudformation:*
             Resource: !Sub 'arn:aws:cloudformation:*:${AWS::AccountId}:stack/${NamePrefix}-cicd-bootstrap*/*'
-          - Sid: DenyCicdIdentityTampering   # ani rol/polityk CI/CD
+          - Sid: DenyCicdIdentityTampering   # ani rol/polityk CI/CD (ale PassRole na cfn-exec musi przejsc)
             Effect: Deny
-            Action: iam:*
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+              - iam:DeleteRolePermissionsBoundary
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:TagPolicy
+              - iam:UntagPolicy
             Resource:
               - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${NamePrefix}-cicd-*'
               - !Sub 'arn:aws:iam::${AWS::AccountId}:policy/${NamePrefix}-cicd-*'
