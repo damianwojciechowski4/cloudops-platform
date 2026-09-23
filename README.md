@@ -1,8 +1,6 @@
 # cloudops-platform
 
-**Platform repo:** `damianwojciechowski4/cloudops-platform` (public, `main`, protected)
-**Sandbox repo:** `damianwojciechowski4/AWS-Projects` (unprotected, experiments)
-**Region:** `eu-central-1` · **Budget:** 6–10 h/week · < 5 USD/month per account
+**Platform repo:** 
 
 ---
 
@@ -19,7 +17,7 @@ Implementation follows a simplified plan: one bootstrap stack per account, two r
 | Canary (`cloudformation/networking/ssm-smoke`) | done |
 | `discover-solutions.py` + tests (5 passed) | done |
 | GH repo variables (`AWS_REGION`, `DEV_ACCOUNT_ID`, `PROD_ACCOUNT_ID`) | done |
-| `deploy.yml` (`discover` + `deploy`, CFN + SAM) | done, first DEV deploy green |
+| `deploy.yml` (`discover` + `deploy-dev`/`deploy-prod`, CFN + SAM) | done, first DEV deploy green |
 | **SAM `hello` (Lambda smoke test)** | **← next step** |
 | GitHub configuration (environments, branch protection, `approve-prod.sh`) | pending (week 3) |
 | Full dev → main → prod run, negative tests N1–N8 | pending (week 3) |
@@ -95,7 +93,7 @@ Each deployable unit is a directory with a `.solution.yml` under `cloudformation
   - `cloudops-cicd-deploy-<env>` — assumed by GitHub Actions. Can only call `cloudformation:*` on `cloudops-*` stacks, `iam:PassRole` to the exec role (scoped to `iam:PassedToService: cloudformation.amazonaws.com`), and read/write the artifacts bucket.
   - `cloudops-cicd-cfn-exec-<env>` — assumed by the CloudFormation service. Can actually create resources (`PowerUserAccess` + scoped IAM for `cloudops-*` roles/policies), but is never assumed directly by CI.
 - **A permissions boundary is attached to every role the pipeline creates**, capping what any of it can ever do — including a deny on touching the bootstrap stack itself and on removing the boundary.
-- **`discover-solutions.py`** diffs the two commits behind a push and returns only the solutions (directories with `.solution.yml`) that changed, in `order`. The `deploy` job runs as a matrix over that list, `max-parallel: 1`.
+- **`discover-solutions.py`** diffs the two commits behind a push and returns only the solutions (directories with `.solution.yml`) that changed, in `order`. Separate `deploy-dev` (push to `dev`) and `deploy-prod` (push to `main`) jobs each run as a matrix over that list, `max-parallel: 1`.
 - **`main` requires parity with `dev`** — before a solution deploys to prod, the workflow diffs that directory between `origin/dev` and the pushed commit. If they differ, the deploy fails: the change skipped promotion through dev.
 - **Prod requires manual approval** via the GitHub `prod` environment's required reviewer (`scripts/approve-prod.sh` approves the pending deployment from the CLI).
 
