@@ -1,0 +1,5 @@
+version = 0.1
+[dev.deploy.parameters]
+parameter_overrides = "EnvName=dev"
+[prod.deploy.parameters]
+parameter_overrides = "EnvName=prod"

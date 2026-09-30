@@ -1,0 +1,21 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Smoke SAM - Lambda bez triggerow. Rola Lambdy MUSI miec boundary (test N5).
+Parameters:
+  EnvName: { Type: String, AllowedValues: [dev, prod] }
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 5
+    MemorySize: 128
+    # Bez tego cfn-exec nie moze stworzyc roli - boundary tego zabrania.
+    PermissionsBoundary: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/cloudops-cicd-boundary-${EnvName}'
+Resources:
+  Hello:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'cloudops-net-hello-${EnvName}'
+      CodeUri: src/
+      Handler: app.handler
+      Environment: { Variables: { ENV_NAME: !Ref EnvName } }
