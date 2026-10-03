@@ -1,0 +1,5 @@
+domain: net
+name: hello
+order: 20
+template: template.yaml
+capabilities: [CAPABILITY_NAMED_IAM]
